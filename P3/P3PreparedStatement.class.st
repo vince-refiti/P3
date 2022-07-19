@@ -23,7 +23,7 @@ Select query:
 	statement := client prepare: 'SELECT name, enabled FROM table1 WHERE id = $1'.
 	result := statement query: #( 123 ).
 
-When I'm no longer needed I should be closed so that the PostgreSQL server side resources for this prepared statemed are freed.
+When I'm no longer needed I should be closed so that the PostgreSQL server side resources for this prepared statement are freed.
 
 See also https://en.wikipedia.org/wiki/Prepared_statement
 
@@ -62,33 +62,36 @@ P3PreparedStatement >> bindStrings: inputValues [
 		nextPutString: name;
 		nextPutInt16: 0;
 		nextPutInt16: inputValues size.
-		
-	inputValues with: paramDescriptions do: [ :eachValue :paramDescription |
-		eachValue isNil
-			ifTrue: [ msgBuilder nextPutNullParameter ]
-			ifFalse: [ msgBuilder nextPutParameterAsText: eachValue description: paramDescription ] ].
 
-	msgBuilder 
-		nextPutInt16: 0.	"All result columns use the text format"		
-		
-	client writeMessageNoFlush: msgBuilder asBytes tag: $B
+	inputValues
+		with: paramDescriptions
+		do: [ :eachValue :paramDescription | 
+			eachValue
+				ifNil: [ msgBuilder nextPutNullParameter ]
+				ifNotNil: [ msgBuilder nextPutParameterAsText: eachValue description: paramDescription ] ].
+
+	msgBuilder nextPutInt16: 0. "All result columns use the text format"
+
+	client writeMessageNoFlush: msgBuilder asBytes tag: $B.
+	
+	client logBinding: self inputValues: inputValues
 ]
 
 { #category : #public }
 P3PreparedStatement >> close [
 	"Close this query and release server side resources."
 
-	client isNil 
-		ifTrue: [ ^ self ].
+	client ifNil: [ ^ self ].
 
 	self writeCloseMessage: name type: $S.
-	self writeFlushMessage.
+	self writeFlushMessage.	
 	
 	"Check for CloseComplete message"
 	client readMessage tag = $3
-		ifFalse: [ self error: 'CloseComplete message expected' ].
+		ifFalse: [ P3Error closeCompleteExpected signal ].	
 	
 	"This prepared statement can no longer be used."
+	client forgetPreparedStatementNamed: name.
 	client := nil
 ]
 
@@ -111,7 +114,7 @@ P3PreparedStatement >> execute: inputRow [
 
 { #category : #public }
 P3PreparedStatement >> executeBatch: inputRows [
-	"Execute this SQL query mutiple (inputRow size) times in a single network roundtrip.
+	"Execute this SQL query multiple (inputRow size) times in a single network roundtrip.
 	Assume no rows will be returned."
 
 	inputRows isEmpty

@@ -14,7 +14,8 @@ Class {
 		'map',
 		'stringWriteStream',
 		'asciiReadStream',
-		'asciiWriteStream'
+		'asciiWriteStream',
+		'timestampClass'
 	],
 	#category : #'P3-Support'
 }
@@ -50,6 +51,8 @@ P3Converter class >> typeMap [
 			1083 #(time #convertTimeFrom:length:description:) 
 			1114 #(timestamp #convertDateAndTimeWithoutTimezoneFrom:length:description:) 
 			1184 #(timestamptz #convertDateAndTimeFrom:length:description:)
+			1186 #(interval #convertIntervalFrom:length:description:)
+			1266 #(timetz #convertTimeWithTimezoneFrom:length:description:)
 			"special"
 			114 #(json #convertJsonFrom:length:description:)
 			2950 #(uuid #convertUuidFrom:length:description:)
@@ -60,6 +63,7 @@ P3Converter class >> typeMap [
 			1009 #(#'_text' #convertStringArrayFrom:length:description:)
 			1015 #(#'_varchar' #convertStringArrayFrom:length:description:)
 			1022 #(#'_float8' #convertFloatArrayFrom:length:description:)
+			1028 #(#'_oid' #convertIntegerArrayFrom:length:description:)
 			"geometric"
 			600 #(point #convertPointFrom:length:description:)
 			601 #(lseg #convertLineSegmentFrom:length:description:)
@@ -68,6 +72,8 @@ P3Converter class >> typeMap [
 			604 #(polygon #convertPolygonFrom:length:description:)
 			628 #(line #convertLineFrom:length:description:)
 			718 #(circle #convertCircleFrom:length:description:)
+			"vectors"
+			30 #( oidvector #convertIntegerVectorFrom:length:description: )
 		)
 ]
 
@@ -101,7 +107,7 @@ P3Converter >> convert: bytes length: length description: description [
 	 		lambda isSymbol 
 				ifTrue: [ self perform: lambda with: bytes with: length with: description ]
 				ifFalse: [ lambda value: bytes value: length value: description ] ]
-		ifAbsent: [ self error: 'P3 cannot convert typeOid ', description typeOid asString ]
+		ifAbsent: [ (P3Error cannotConvertTypeOid: description typeOid) signal ]
 ]
 
 { #category : #converting }
@@ -152,24 +158,32 @@ P3Converter >> convertCircleFrom: bytes length: length description: description 
 
 { #category : #'converting-chronology' }
 P3Converter >> convertDateAndTimeFrom: bytes length: length description: description [
-	"TIMESTAMP WITH TIME ZONE (TIMESTAMPTZ) is stored internally in Postgres as UTC, but represented in the timezone of the connection, with a correct offset added. In other words, Postgres does the necessary shifting, we just have to read the result"
+	"TIMESTAMP WITH TIME ZONE (TIMESTAMPTZ) is stored internally in Postgres as UTC, but represented in the timezone of the connection, with a correct offset added. In other words, Postgres does the necessary shifting, we just have to read the result. For this to work, the connection output format must be ISO, the default."
 	
-	^ DateAndTime readFrom: (self asciiStreamFor: bytes length: length)
+	^ (P3ISO8601Parser on: (self asciiStreamFor: bytes length: length))
+			timestampClass: timestampClass;
+			parseDateAndTime
 ]
 
 { #category : #'converting-chronology' }
 P3Converter >> convertDateAndTimeWithoutTimezoneFrom: bytes length: length description: description [
-	"TIMESTAMP WITHOUT TIME ZONE (TIMESTAMP) is stored internally in Postgres the way it was inserted, its representation remains constant, with no offset added. We use the timezone of the connection to do the necessary shifting. This assumes that the timezones used during insert/update and query are the same."
+	"TIMESTAMP WITHOUT TIME ZONE (TIMESTAMP) is stored internally in Postgres the way it was inserted, its representation remains constant, with no offset added. We use the timezone of the connection to do the necessary shifting. This assumes that the timezones used during insert/update and query are the same. For this to work, the connection output format must be ISO, the default."
 
 	| timestamp offset |
-	timestamp := DateAndTime readFrom: (self asciiStreamFor: bytes length: length) defaultOffset: Duration zero.
+	timestamp := (P3ISO8601Parser on: (self asciiStreamFor: bytes length: length))
+							timestampClass: timestampClass;
+							parseDateAndTime.
 	offset := self timezone offsetForTimestamp: timestamp.
-	^ timestamp translateTo: offset
+	^ offset isZero
+		ifTrue: [ timestamp ]
+		ifFalse: [ timestamp translateTo: offset ]
 ]
 
 { #category : #'converting-chronology' }
 P3Converter >> convertDateFrom: bytes length: length description: description [
-	^ Date readFrom: (self asciiStreamFor: bytes length: length)
+	"For this to work, the connection output format must be ISO, the default"
+	
+	^ (P3ISO8601Parser on: (self asciiStreamFor: bytes length: length)) parseDate
 ]
 
 { #category : #converting }
@@ -207,6 +221,21 @@ P3Converter >> convertIntegerArrayFrom: bytes length: length description: descri
 { #category : #converting }
 P3Converter >> convertIntegerFrom: bytes length: length description: description [
 	^ Integer readFrom: (self asciiStreamFor: bytes length: length) base: 10
+]
+
+{ #category : #'converting-arrays' }
+P3Converter >> convertIntegerVectorFrom: bytes length: length description: description [
+	| input |
+	input := ZnLimitedReadStream on: bytes limit: length.
+	input := ZnCharacterReadStream on: input encoding: self encoder.
+	^ P3IntegerVectorValueParser new
+		  on: input;
+		  next
+]
+
+{ #category : #'converting-chronology' }
+P3Converter >> convertIntervalFrom: bytes length: length description: description [
+	^ P3Interval readFrom: (self asciiStreamFor: bytes length: length)
 ]
 
 { #category : #'converting-special' }
@@ -278,7 +307,34 @@ P3Converter >> convertSymbolFrom: bytes length: length description: description 
 
 { #category : #'converting-chronology' }
 P3Converter >> convertTimeFrom: bytes length: length description: description [
-	^ Time readFrom: (self asciiStreamFor: bytes length: length)
+	"TIME [ WITHOUT TIME ZONE ] corresponds to Time, i.e. 
+	both have no knowledge about the applicable time zone.
+	We assume the time to be correct as there is no sensible conversion to be done.
+	For this to work, the connection output format must be ISO, the default"
+	
+	^ (P3ISO8601Parser on: (self asciiStreamFor: bytes length: length)) parseTime
+]
+
+{ #category : #'converting-chronology' }
+P3Converter >> convertTimeWithTimezoneFrom: bytes length: length description: description [
+	"TIME WITH TIME ZONE corresponds to Time plus an offset. 
+	Time does not hold a time zone nor an offset.
+	We compare the offset coming in with the offset for that time today 
+	in our connection's timezone, if they differ we correct to compensate.
+	For this to work, the connection output format must be ISO, the default"
+
+	| parser time offset connectionOffset translatedTime |
+	parser := P3ISO8601Parser on: (self asciiStreamFor: bytes length: length).
+	time := parser parseTime.
+	offset := parser parseOptionalTimezoneOffset seconds.
+	connectionOffset := self timezone offsetForTimestamp: (ZTimestamp today + time).
+	^ offset = connectionOffset 
+		ifTrue: [ time ]
+		ifFalse: [ 
+			translatedTime := time subtractTime: (offset - connectionOffset).
+			^ translatedTime seconds < 0 
+				ifTrue: [ translatedTime addSeconds: 24 * 60 * 60 ]
+				ifFalse: [ translatedTime ] ]
 ]
 
 { #category : #'converting-special' }
@@ -311,27 +367,32 @@ P3Converter >> encoder: anObject [
 	encoder := anObject
 ]
 
-{ #category : #initalize }
+{ #category : #initialize }
 P3Converter >> initialize [
 	super initialize.
 	asciiReadStream := String new readStream.
 	asciiWriteStream := String new writeStream.
 	stringWriteStream := String new writeStream.
+	timestampClass := DateAndTime.
 	self initializeTypeMap
 ]
 
-{ #category : #initalize }
+{ #category : #initialize }
 P3Converter >> initializeFrom: properties [
 	| serverTimezone serverEncoder |
+	"Try to resolve the session/connection timezone"
 	serverTimezone := properties at: 'TimeZone' ifAbsent: [ 'GMT' ].
-	serverTimezone := ZTimezone id: serverTimezone.
+	"The fallback for unknown timezones is normally GMT but can be overwritten with ZCurrentTimezone."
+	serverTimezone := [ ZTimezone id: serverTimezone ] on: Error do: [ ZCurrentTimezone value ].
 	self timezone: serverTimezone.
+	"Try to resolve the session/connection character encoder/decoder"
 	serverEncoder := properties at: 'client_encoding' ifAbsent: [ 'UTF8' ].
+	"The fallback for unknown encodings is normally UTF8 but can be overwritten ZnDefaultCharacterEncoder."
 	serverEncoder := ZnCharacterEncoder newForEncoding: serverEncoder.
 	self encoder: serverEncoder
 ]
 
-{ #category : #initalize }
+{ #category : #initialize }
 P3Converter >> initializeTypeMap [
 	map := self class typeMap
 ]
@@ -350,6 +411,16 @@ P3Converter >> printOn: stream [
 	stream space.
 	self timezone ifNotNil: [ :tmz | stream print: tmz id ].
 	stream nextPut: $)
+]
+
+{ #category : #accessing }
+P3Converter >> timestampClass [
+	^ timestampClass
+]
+
+{ #category : #accessing }
+P3Converter >> timestampClass: anObject [
+	timestampClass := anObject
 ]
 
 { #category : #accessing }

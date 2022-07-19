@@ -39,13 +39,13 @@ P3MessageBuilder >> nextPutByte: anInteger [
 { #category : #writing }
 P3MessageBuilder >> nextPutInt16: anInteger [
 
-	2 to: 1 by: -1 do: [ :index | byteStream nextPut: (anInteger digitAt: index) ]
+	2 to: 1 by: -1 do: [ :index | byteStream nextPut: (anInteger byteAt: index) ]
 ]
 
 { #category : #writing }
 P3MessageBuilder >> nextPutInt32: anInteger [
 
-	4 to: 1 by: -1 do: [ :index | byteStream nextPut: (anInteger digitAt: index) ]
+	4 to: 1 by: -1 do: [ :index | byteStream nextPut: (anInteger byteAt: index) ]
 ]
 
 { #category : #writing }
@@ -99,10 +99,35 @@ P3MessageBuilder >> printByteArray: byteArray on: stream [
 ]
 
 { #category : #'printing-dispatched' }
+P3MessageBuilder >> printDate: date on: stream [
+	"Use ISO 8601 YYYY-MM-DD"
+	
+	stream nextPut: $'.
+	date printOn: stream format: #(3 2 1 $- 1 1 2).
+	stream nextPut: $'
+]
+
+{ #category : #'printing-dispatched' }
+P3MessageBuilder >> printDateAndTime: dateAndTime on: stream [
+	"Use ISO 8601 YYYY-MM-DDThh:mm:ss.s+ZZ:zz"
+	
+	stream nextPut: $'.
+	dateAndTime printOn: stream.
+	stream nextPut: $' 
+]
+
+{ #category : #'printing-dispatched' }
 P3MessageBuilder >> printGeometricObject: geometricObject on: stream [
 	"Delegate to P3GeometricObject that knows how to print itself in unescaped, raw PSQL text format"
 	
 	geometricObject printOn: stream
+]
+
+{ #category : #'printing-dispatched' }
+P3MessageBuilder >> printInterval: interval on: stream [
+	"Delegate to P3Interval that knows how to print itself in postgresql style"
+	
+	stream print: interval
 ]
 
 { #category : #'printing-dispatched' }
@@ -134,6 +159,26 @@ P3MessageBuilder >> printString: string on: stream [
 	"For strings just output the characters of the string, no escaping is needed"
 	
 	stream nextPutAll: string
+]
+
+{ #category : #'printing-dispatched' }
+P3MessageBuilder >> printTime: time on: stream [
+	"Use ISO 8601 hh:mm:ss"
+	
+	stream nextPut: $'.
+	time print24: true on: stream.
+	stream nextPut: $'
+]
+
+{ #category : #'printing-dispatched' }
+P3MessageBuilder >> printValuesArray: valuesArray on: stream [
+	| first |
+	first := true.
+	stream nextPut: ${.
+	valuesArray do: [ :each |
+		first ifTrue: [ first := false ] ifFalse: [ stream nextPut: $, ].
+		each p3PrintUsing: self on: stream ].
+	stream nextPut: $}
 ]
 
 { #category : #writing }

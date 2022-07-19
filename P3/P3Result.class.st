@@ -3,13 +3,14 @@ I am P3Result, I encapsulate the result from a PostgreSQL query.
 
 I hold 3 things:
 
-- results -  the command completion tags, a String (singular if there was only one query) or a collection ofStrings (if there were multiple queries) in the form of 'SELECT 100'
+- results -  the command completion tags, a String (singular if there was only one query) or a collection of Strings (if there were multiple queries) in the form of 'SELECT 100'
 
 - descriptions - a collection of P3RowFieldDescription objects (one for each column, nil if there is no data)
 
 - data - a collection of records with each field value converted to objects, nil if there is no data
 
 Even if there are multiple queries, there can only be one stream of records. Most of the time, results is singular.
+In the case of multiple queries, there will be multiple results (an array of results), one for each query. However, only the last record stream will be in the data and descriptions.
 "
 Class {
 	#name : #P3Result,
@@ -134,6 +135,14 @@ P3Result >> hasResults [
 ]
 
 { #category : #accessing }
+P3Result >> lastResult [
+	"Return the SQL query execution result, or the last one if there are multiple results.
+	Among other things, the result indicates how many rows were returned or modified."
+	
+	^ results isString ifTrue: [ results ] ifFalse: [ results last ]
+]
+
+{ #category : #accessing }
 P3Result >> numberOfColumns [
 	"Return the number of columns that I hold.
 	Each record in my data will be of this size."
@@ -150,19 +159,31 @@ P3Result >> numberOfRecords [
 ]
 
 { #category : #printing }
+P3Result >> printInfoOn: stream [
+	self hasResults
+		ifTrue: [ 
+			results isString
+				ifTrue: [ stream nextPutAll: results ]
+				ifFalse: [ 
+					results 
+						do: [ :each | stream nextPutAll: each ]
+						separatedBy: [ stream << ', ' ] ] ].
+	(self hasData and: [ self data notEmpty ])
+		ifTrue: [ 
+			stream
+				<< ', ';
+				print: self numberOfRecords;
+				<< (' record' asPluralBasedOn: self numberOfRecords);
+				<< ', ';
+				print: self numberOfColumns;
+				<< (' colum' asPluralBasedOn: self numberOfColumns) ]
+]
+
+{ #category : #printing }
 P3Result >> printOn: stream [
 	super printOn: stream.
 	stream nextPut: $(.
-	self hasResults
-		ifTrue: [ stream print: results ].
-	self hasData
-		ifTrue: [ stream
-				space;
-				print: self numberOfRecords;
-				<< (' record' asPluralBasedOn: self numberOfRecords);
-				space;
-				print: self numberOfColumns;
-				<< (' colum' asPluralBasedOn: self numberOfColumns) ].
+	self printInfoOn: stream.
 	stream nextPut: $)
 ]
 
@@ -218,6 +239,8 @@ P3Result >> rowCount [
 
 { #category : #private }
 P3Result >> rowCountFromCommandResultTag: string [
+
+	string ifEmpty: [ ^ 0 ].
 	^ ($ split: string) last asInteger
 ]
 

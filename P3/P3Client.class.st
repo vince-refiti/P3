@@ -7,7 +7,7 @@ I use frontend/backend protocol 3.0 (PostgreSQL version 7.4 [2003] and later), i
 
 I can be configured manually or through a URL.
 
-  P3Client new url: 'psql://username:password@localhost:5432/databasename'.
+  P3Client new url: 'psql://username:password@localhost:5432/databasename?sslmode=require'.
 
 Not all properties need to be specified, the minimum is the following URL.
 
@@ -45,7 +45,7 @@ Now we can query the contents of the simple table we just created.
 
 The result is an instance of P3Result
 
-    a P3Result('SELECT 2' 2 records 3 colums)
+    a P3Result('SELECT 2' 2 records 3 columns)
 
 P3Result contains 3 elements,  results, descriptions & data:
 - Results is a string (collection of strings for multiple embedded queries) indicating successful execution.
@@ -86,9 +86,8 @@ Class {
 	#category : #'P3-Core'
 }
 
-{ #category : #accessing }
+{ #category : #'instance creation' }
 P3Client class >> url: anUrl [
-
 	^ self new url: anUrl 
 ]
 
@@ -102,6 +101,19 @@ P3Client >> asCString: string [
 	^ bytes
 ]
 
+{ #category : #'private - authentication' }
+P3Client >> authenticationTypes [
+	^ { 
+		0 -> #Ok. 
+		2 -> #KerberosV5. 
+		3 -> #CleartextPassword. 
+		5 -> #MD5Password.
+		6 -> #SCMCredential.
+		7 -> #GSS.
+		9 -> #SSPI.
+		10 -> #SASL } asDictionary
+]
+
 { #category : #private }
 P3Client >> clearSSL [
 	settings removeKey: #ssl ifAbsent: [ ]
@@ -109,13 +121,12 @@ P3Client >> clearSSL [
 
 { #category : #private }
 P3Client >> clearSession [
-
 	session := nil
 ]
 
 { #category : #'private messages' }
 P3Client >> clearTextPasswordMessage [
-	self password ifNil: [ self error: 'Password required' ].
+	self password ifNil: [ P3Error passwordRequired signal ].
 	^ self asCString: self password
 ]
 
@@ -126,6 +137,7 @@ P3Client >> close [
 	connection
 		ifNotNil: [ 
 			[ 
+				self logDisconnecting.
 				self writeMessage: #[] tag: $X. 
 				connection close ] on: Error do: [  ].
 				self clearSession.
@@ -139,12 +151,21 @@ P3Client >> connect [
 	
 	self 
 		ensureOpen;
+		connectInternal;
+	 	clearSSL;
+		logConnected
+]
+
+{ #category : #protocol }
+P3Client >> connectInternal [
+	"Run the authentication and startup protocols. Configure the session."
+	
+	self 
 		writeMessage: self startupMessage;
 		reset;
 		runAuthentication;
 		runStartup;
-		initializeConverter;
-	 	clearSSL
+		initializeConverter
 ]
 
 { #category : #public }
@@ -154,10 +175,10 @@ P3Client >> connectSSL [
 	
 	self 
 		ensureOpen;
-	 	writeMessage: self sslRequestMessage;
 	 	upgradeToSSL;
-		connect;
-	 	setSSL
+		connectInternal;
+	 	setSSL;
+		logConnected 
 
 ]
 
@@ -177,9 +198,22 @@ P3Client >> converter [
 	^ converter ifNil: [ converter := P3Converter new ]
 ]
 
-{ #category : #accessing }
+{ #category : #private }
 P3Client >> converter: anObject [
 	converter := anObject
+]
+
+{ #category : #private }
+P3Client >> createPreparedStatementNamed: name withParameters: parameterDescriptions andFields: rowDescriptions [
+	| preparedStatement |
+	preparedStatement := P3PreparedStatement 
+		newWith: self 
+		name: name 
+		parameters: parameterDescriptions 
+		fields: rowDescriptions.
+	(properties at: 'prepared_statements' ifAbsentPut: [ Dictionary new ])
+		at: name put: preparedStatement.
+	^ preparedStatement
 ]
 
 { #category : #accessing }
@@ -213,11 +247,6 @@ P3Client >> ensureOpen [
 ]
 
 { #category : #'error handling' }
-P3Client >> error: string [
-	self signal: P3Error using: { $M -> string } asDictionary  
-]
-
-{ #category : #'error handling' }
 P3Client >> errorNoticeInfo: payload [
 	| info fieldType |
 	info := Dictionary new.
@@ -240,6 +269,14 @@ P3Client >> execute: query [
 	^ result results
 ]
 
+{ #category : #private }
+P3Client >> forgetPreparedStatementNamed: name [
+	properties 
+		at: 'prepared_statements' 
+		ifPresent: [ :preparedStatements | 
+			preparedStatements removeKey: name ifAbsent: [ ] ]
+]
+
 { #category : #public }
 P3Client >> format: anSQLTemplateString [
 	"Create and return a P3FormattedStatement based on anSQLTemplateString and bound to me.
@@ -251,6 +288,68 @@ P3Client >> format: anSQLTemplateString [
 		client: self;
 		sql: anSQLTemplateString;
 		yourself
+]
+
+{ #category : #'private - authentication' }
+P3Client >> handleAuthentication: code [
+	| type |
+	type := self authenticationTypes 
+		at: code 
+		ifAbsent: [ (P3Error unsupportedAuthenticationType: code) signal ].
+	properties at: #'authentication_type' ifAbsentPut: type. "else OK will overwrite"
+	^ self perform: #handleAuthentication , type
+]
+
+{ #category : #'private - authentication' }
+P3Client >> handleAuthenticationCleartextPassword [
+	self writeMessage: self clearTextPasswordMessage tag: $p.
+	^ false
+]
+
+{ #category : #'private - authentication' }
+P3Client >> handleAuthenticationGSS [
+	(P3Error unsupportedAuthenticationType: #GSS) signal
+]
+
+{ #category : #'private - authentication' }
+P3Client >> handleAuthenticationKerberosV5 [
+	(P3Error unsupportedAuthenticationType: #KerberosV5) signal
+]
+
+{ #category : #'private - authentication' }
+P3Client >> handleAuthenticationMD5Password [
+	| salt |
+	salt := message readStream next: 4.
+	self writeMessage: (self md5PasswordMessage: salt) tag: $p.
+	^ false
+]
+
+{ #category : #'private - authentication' }
+P3Client >> handleAuthenticationOk [
+	^ true
+]
+
+{ #category : #'private - authentication' }
+P3Client >> handleAuthenticationSASL [
+	| saslAuthenticationMechanisms |
+	saslAuthenticationMechanisms := Array streamContents: [ :out | | line |
+		[ (line := self converter asciiCStringFrom: message readStream) isEmpty ]
+			whileFalse: [ out nextPut: line ] ].
+	(saslAuthenticationMechanisms includes: 'SCRAM-SHA-256')
+		ifTrue: [
+			self runSASLSCRAMSHA256Authentication. 
+			^ false ].
+	(P3Error unsupportedAuthenticationType: #SASL) signal
+]
+
+{ #category : #'private - authentication' }
+P3Client >> handleAuthenticationSCMCredential [
+	(P3Error unsupportedAuthenticationType: #SCMCredential) signal
+]
+
+{ #category : #'private - authentication' }
+P3Client >> handleAuthenticationSSPI [
+	(P3Error unsupportedAuthenticationType: #SSPI) signal
 ]
 
 { #category : #accessing }
@@ -279,19 +378,17 @@ P3Client >> initialize [
 
 { #category : #private }
 P3Client >> initializeConverter [
-
-	self converter initializeFrom: properties
+	self converter initializeFrom: properties.
+	self converter timestampClass: self timestampClass
 ]
 
 { #category : #testing }
 P3Client >> isConnected [
 	"Return true when my connection is in working order (from my end)"
 
-	^ connection notNil and: [ 
-			connection isConnected and: [ 
-				session notNil 
-			] 
-		]
+	^ connection notNil
+			and: [ connection isConnected 
+				and: [ session notNil ] ]
 ]
 
 { #category : #testing }
@@ -299,6 +396,20 @@ P3Client >> isSSL [
 	"Return true if my current connection is SSL encrypted"
 	
 	^ settings at: #ssl ifAbsent: [ false ]
+]
+
+{ #category : #testing }
+P3Client >> isServerVersionAtLeastMajor: major minor: minor [
+	"Return true when the server version if at least major.minor, false otherwise"
+	
+	| serverVersion |
+	serverVersion := ($. split: self serverVersion) collect: [ :each |
+		"try to be robust for non-numeric version elements"
+		Number readFrom: each ifFail: [ nil ] ].
+	^ serverVersion first > major
+			or: [ 
+				serverVersion first = major 
+					and: [ serverVersion second >= minor ] ]
 ]
 
 { #category : #testing }
@@ -360,21 +471,95 @@ P3Client >> loadEnums [
 		each second asSymbol ]
 ]
 
+{ #category : #'private - logging' }
+P3Client >> logBinding: statement inputValues: inputValues [
+	(self newLogEvent: P3StatementBoundEvent)
+		statement: statement;
+		inputValues: inputValues;
+		emit.
+	properties at: #query_started put: Time millisecondClockValue
+]
+
+{ #category : #'private - logging' }
+P3Client >> logConnected [
+	(self newLogEvent: P3ConnectionEstablishedEvent)
+		settings: settings copy;
+		properties: properties copy;
+		emit
+]
+
+{ #category : #'private - logging' }
+P3Client >> logDisconnecting [
+	(self newLogEvent: P3ConnectionClosedEvent)
+		emit 
+]
+
+{ #category : #'private - logging' }
+P3Client >> logError: error [
+	(self newLogEvent: P3ErrorOccurredEvent)
+		exception: error;
+		emit
+]
+
+{ #category : #'private - logging' }
+P3Client >> logPreparedStatement: statement query: query [
+	(self newLogEvent: P3StatementPreparedEvent)
+		statement: statement;
+		query: query;
+		emit
+]
+
+{ #category : #'private - logging' }
+P3Client >> logQuery: query [
+	(self newLogEvent: P3QueryWrittenEvent)
+		query: query;
+		emit.
+	properties at: #query_started ifAbsentPut: Time millisecondClockValue
+]
+
+{ #category : #'private - logging' }
+P3Client >> logResult: result [
+	| duration |
+	duration := properties 
+		at: #query_started 
+		ifPresent: [ :initialMilliseconds | Time millisecondsSince: initialMilliseconds ]
+		ifAbsent: [ 0 ].
+	(self newLogEvent: P3ResultReadEvent)
+		result: result;
+		duration: duration;
+		emit.
+	properties removeKey: #query_started
+]
+
+{ #category : #'private - logging' }
+P3Client >> logRetryConnection: remaining [
+	(self newLogEvent: P3RetryConnectionEvent)
+		remaining: remaining;
+		delay: self retryDelay;
+		emit
+]
+
 { #category : #'private messages' }
 P3Client >> md5PasswordMessage: salt [
 	"concat('md5', md5(concat(md5(concat(password, username)), random-salt))).
 	Keep in mind the md5() function returns its result as a hex string."
 	
 	| credential salted |
-	self password ifNil: [ self error: 'Password required' ].
+	self password ifNil: [ P3Error passwordRequired signal ].
 	credential := (MD5 hashMessage: self password , self user) hex.
 	salted := (MD5 hashMessage: credential , salt) hex.
 	^ self asCString: 'md5' , salted
 ]
 
+{ #category : #'private - logging' }
+P3Client >> newLogEvent: logEventClass [
+	^ logEventClass new
+			session: self session;
+			yourself
+]
+
 { #category : #private }
 P3Client >> newMessageBuilder [
-
 	^ P3MessageBuilder newWithEncoder: self converter encoder
 ]
 
@@ -391,7 +576,7 @@ P3Client >> open [
 
 { #category : #accessing }
 P3Client >> password [
-	"Return the password  of my database connection.
+	"Return the password of my database connection.
 	For no password, nil is used."
 
 	^ settings at: #password ifAbsent: [ nil ]
@@ -423,14 +608,32 @@ P3Client >> port: integer [
 
 { #category : #public }
 P3Client >> prepare: query [
+	"Create a P3PreparedStatement with a default name derived from the query string. 
+	Only the first 63 characters of the name are significant. For longer queries try
+	to make a unique name by using the hash value of the query string."
+
+	| name |
+	
+	name := query.
+	name size > 63
+		ifTrue: [ 
+			| hashString |
+			hashString := name hash printStringHex.
+			name := (name copyFrom: 1 to: 62 - hashString size), '_', hashString ].
+		
+	^ self prepare: query named: name
+]
+
+{ #category : #public }
+P3Client >> prepare: query named: queryName [
 	"Create and return an instance of P3PreparedStatement by parsing query, 
 	which can contain one or more placeholders, once. Later the prepared statement can be executed 
 	multiple times by providing an array with a value for each placeholder. 
-	When no longer needed, the prepared statement should be closed. See P3PreparedStatement."
+	When no longer needed, the prepared statement should be closed. See P3PreparedStatement.
+	Each prepared statement must have a unique name. Note that in a standard Postgres installation 
+	only the first 63 characters of queryName are significant."
 
-	| queryName paramDescriptions rowDescriptions |
-	
-	queryName := query.
+	| parameterDescriptions rowDescriptions statement |
 
 	self 
 		ensureConnected;
@@ -439,15 +642,15 @@ P3Client >> prepare: query [
 		writeSyncMessage.
 
 	self readMessage tag = $1
-		ifFalse: [ ^ self error: 'ParseComplete message expected' ].
+		ifFalse: [ ^ P3Error parseCompleteExpected signal ].
 
 	self readMessage.
 	message tag = $t
-		ifTrue: [ paramDescriptions := self processParameterDescription: message readStream ]
+		ifTrue: [ parameterDescriptions := self processParameterDescription: message readStream ]
 		ifFalse: [ 
-			paramDescriptions := #().
+			parameterDescriptions := #().
 			message tag = $n 
-				ifFalse: [ self error: 'NoData message expected' ] ].
+				ifFalse: [ P3Error noDataExpected signal ] ].
 
 	self readMessage.
 	message tag = $T
@@ -455,15 +658,32 @@ P3Client >> prepare: query [
 		ifFalse: [ 
 			rowDescriptions := #().
 			message tag = $n
-				ifFalse: [ self error: 'NoData message expected' ] ].
+				ifFalse: [ P3Error noDataExpected signal ] ].
 
 	self readMessage tag = $Z
-		ifFalse: [ ^ self error: 'ReadyForQuery message expected' ].
+		ifFalse: [ ^ P3Error readyForQueryExpected signal ].
 
-	^ P3PreparedStatement newWith: self 
-			name: queryName 
-			parameters: paramDescriptions 
-			fields: rowDescriptions
+	statement := self 
+		createPreparedStatementNamed: queryName 
+		withParameters: parameterDescriptions 
+		andFields: rowDescriptions.
+	
+	self logPreparedStatement: statement query: query.
+	 	
+	^ statement
+]
+
+{ #category : #accessing }
+P3Client >> preparedStatementNamed: name [
+	"Return the P3PreparedStatement previously created under name, else signal NotFound"
+	
+	properties 
+		at: 'prepared_statements'
+		ifPresent: [ :preparedStatements |
+			preparedStatements 
+				at: name 
+				ifPresent: [ :preparedStatement | ^ preparedStatement ] ].
+	NotFound signalFor: name in: self
 ]
 
 { #category : #printing }
@@ -477,7 +697,6 @@ P3Client >> printOn: stream [
 
 { #category : #private }
 P3Client >> processBackendKeyData: payload [
-
 	session := payload uint32.
 	properties at: 'backend_process_id' put: session.
 	properties at: 'backend_secret_key' put: payload uint32
@@ -540,22 +759,23 @@ P3Client >> processRowDescription: payload [
 
 { #category : #public }
 P3Client >> query: query [
-	"Execute an SQL query against PostgreSQL. Return a triplet { result. descriptions. data }.
-	Result is a string (collection of strings for multiple embedded queries) indicating successful execution.
-	Descriptions is a collection of row field description objects.
-	Data is a collection of rows with fully converted field values as objects."
+	"Execute an SQL query against PostgreSQL. Return a P3Result object containing result(s), column descriptions and data.
+	Result(s) is a string (collection of strings for multiple embedded queries) indicating successful execution.
+	Descriptions is a collection of row field description objects, if any.
+	Data is a collection of rows with fully converted field values as objects, if any."
 
-	^ self 
-		ensureConnected;
-		writeQueryMessage: query;
-		runQueryResult
+	^ self withConnection: [
+		self 
+			ensureConnected;
+			writeQueryMessage: query;
+			runQueryResult ]
 ]
 
 { #category : #accessing }
 P3Client >> queryEncoding [
-	"Return the name of the encoder used"
+	"An alias used by PharoDatabaseAccessor, kept for compatibility"
 	
-	^ self converter encoder identifier
+	^ self serverEncoding
 ]
 
 { #category : #'input/output' }
@@ -590,39 +810,64 @@ P3Client >> readMessageOnError: block [
 
 { #category : #private }
 P3Client >> reset [
-
 	self clearSession.
 	properties removeAll.
 	converter := nil
+]
+
+{ #category : #accessing }
+P3Client >> retryCount [
+	"Return how many times a reconnection will be tried on a failed connection, the default being 10 times.
+	See also #retryDelay."
+	
+	^ settings at: #retryCount ifAbsentPut: [ 10 ]
+]
+
+{ #category : #'initialize-release' }
+P3Client >> retryCount: count [
+	"Set how many times a reconnection will be tried on a failed connection, the default being 10 times.
+	See also #retryDelay:"
+	
+	settings at: #retryCount put: count
+]
+
+{ #category : #accessing }
+P3Client >> retryDelay [
+	"Return the delay after which a reconnection will be tried on a failed connection, the default being 5 seconds.
+	See also #retryCount."
+	
+	^ settings at: #retryDelay ifAbsentPut: [ 5 ]
+]
+
+{ #category : #'initialize-release' }
+P3Client >> retryDelay: seconds [
+	"Set the delay after which a reconnection will be tried on a failed connection, the default being 5 seconds.
+	See also #retryCount:"
+	
+	settings at: #retryDelay put: 5
 ]
 
 { #category : #protocol }
 P3Client >> runAuthentication [
 	[
 	self readMessageCloseAfterError tag = $R
-		ifTrue: [ | authenticationCode salt |
-			authenticationCode := message readStream next: 4.
-			authenticationCode = #[ 0 0 0 0 ] "AuthenticationOk"
-				ifTrue: [ ^ self ].
-			authenticationCode = #[ 0 0 0 3 ] "AuthenticationCleartextPassword"
-				ifTrue: [ self writeMessage: self clearTextPasswordMessage tag: $p ].
-			authenticationCode = #[ 0 0 0 5 ] "AuthenticationMD5Password"
-				ifTrue: [
-					salt := message readStream next: 4.
-					self writeMessage: (self md5PasswordMessage: salt) tag: $p ] ]
+		ifTrue: [ | authenticationCode |
+			authenticationCode := (message readStream next: 4) asInteger.
+			(self handleAuthentication: authenticationCode)
+				ifTrue: [ ^ self ] ]
 		ifFalse: [ 
-			^ self error: 'Unexpected message during authentication' ] ] repeat
+			^ P3Error unexpectedMessageDuringAuthentication signal ] ] repeat
 ]
 
 { #category : #protocol }
 P3Client >> runExtendedQueryResult: descriptions [
 	"Read DataRow ($D) messages until either a CommandComplete ($C) or PortalSuspended ($s) message is received."
 
-	| rows |
+	| rows result |
 
-			"Check for BindComplete message"
+	"Check for BindComplete message"
 	message tag = $2
-		ifFalse: [ ^ self error: 'BindComplete message expected' ].
+		ifFalse: [ ^ P3Error bindCompleteExpected signal ].
 	self readMessage.
 
 	rows := Array streamContents: [ :out |
@@ -631,19 +876,25 @@ P3Client >> runExtendedQueryResult: descriptions [
 			out nextPut: (self processDataRowUsing: descriptions).
 			self readMessage ] ].
 	
-	^ P3Result descriptions: descriptions
+	result := P3Result descriptions: descriptions
 			rows: rows 
-			message: (self converter asciiCStringFrom: message readStream)
+			message: (self converter asciiCStringFrom: message readStream).
+	
+	self logResult: result.
+	 
+	^ result
 ]
 
 { #category : #protocol }
 P3Client >> runExtendedQueryResults: fieldDescriptions [
 	
-	| results |
+	| results queryStarted |
 
+	queryStarted := Time millisecondClockValue.
 	self readMessage.
 	results := Array streamContents: [ :out |
 		[
+			properties at: #query_started ifAbsentPut: queryStarted. "each result will use the same start"
 			out nextPut: (self runExtendedQueryResult: fieldDescriptions).
 			self readMessage tag = $Z ] whileFalse ].
 	
@@ -654,17 +905,38 @@ P3Client >> runExtendedQueryResults: fieldDescriptions [
 P3Client >> runQueryResult [
 	| result |
 	result := P3Result new.
-	self readMessage tag = $T
-		ifTrue: [ result descriptions: (self processRowDescription: message readStream) ].
-	message tag = $C ifFalse: [ 
-		result data: (Array streamContents: [ :out |
-			[ self readMessage tag = $C ] whileFalse: [ 
-				self assert: message tag = $D.
-				out nextPut: (self processDataRowUsing: result descriptions) ] ]) ].
-	[
+	self readMessage. 
+	[ 
+		message tag = $T
+			ifTrue: [ result descriptions: (self processRowDescription: message readStream) ].
+		message tag = $C
+			ifFalse: [ 
+				result data: (Array streamContents: [ :out | 
+					[ self readMessage tag = $C ] whileFalse: [ 
+						self assert: message tag = $D.
+						out nextPut: (self processDataRowUsing: result descriptions) ] ]) ].
 		result addResult: (self converter asciiCStringFrom: message readStream).
-		self readMessage tag = $Z ] whileFalse.
+		self readMessage tag = $S
+			ifTrue: [ self processParameterStatus: message readStream; readMessage ].
+		message tag = $Z ] whileFalse.
+	self logResult: result.
 	^ result
+]
+
+{ #category : #'private - authentication' }
+P3Client >> runSASLSCRAMSHA256Authentication [
+	| scram  |
+	scram := self scramSHA256.
+	self writeMessage: (self saslSCRAMSHA256FirstMessage: scram) tag: $p. "SASLInitialResponse"
+	self readMessageCloseAfterError tag = $R "AuthenticationSASLContinue"
+		ifFalse: [ P3Error unexpectedMessageDuringAuthentication signal ].
+	self assert: (message readStream next: 4) asInteger = 11.
+	scram serverFirstMessage: message readStream upToEnd asString.
+	self writeMessage: scram clientFinalMessage asByteArray tag: $p. "SASLResponse"
+	self readMessageCloseAfterError tag = $R "AuthenticationSASLFinal"
+		ifFalse: [ P3Error unexpectedMessageDuringAuthentication signal ].
+	self assert: (message readStream next: 4) asInteger = 12.
+	scram serverFinalMessage: message readStream upToEnd asString
 ]
 
 { #category : #protocol }
@@ -678,7 +950,51 @@ P3Client >> runStartup [
 		ifFalse: [  
 			message tag = $K
 				ifTrue: [ self processBackendKeyData: message readStream ]
-				ifFalse: [ ^ self error: 'Unexpected message during startup' ] ] ] repeat
+				ifFalse: [ ^ P3Error unexpectedMessageDuringStartup signal ] ] ] repeat
+]
+
+{ #category : #'private messages' }
+P3Client >> saslSCRAMSHA256FirstMessage: scram [
+	| saslMessage |
+	saslMessage := scram clientFirstMessage.
+	^ (self asCString: 'SCRAM-SHA-256')
+		, (saslMessage size asByteArrayOfSize: 4) 
+		, saslMessage asByteArray
+
+]
+
+{ #category : #'private - authentication' }
+P3Client >> scramSHA256 [
+	self password ifNil: [ P3Error passwordRequired signal ].
+	^ P3SCRAM
+		storeAt: self url
+		ifAbsentPut: [ 
+			P3SCRAM new
+				sha256;
+				password: self password;
+				yourself ]
+]
+
+{ #category : #accessing }
+P3Client >> serverEncoding [
+	"Return the name of the encoder/decoder used by the server for this session/connection.
+	This is determined automatically from the client_encoding property of the server.
+	One way to set the default at the database level is with the SQL command
+	ALTER DATABASE <mydb> SET client_encoding TO 'UTF8' "
+	
+	self ensureConnected.
+	^ self converter encoder identifier
+]
+
+{ #category : #accessing }
+P3Client >> serverTimezone [
+	"Return the name of the timezone used by the server for this session/connection.
+	This is determined automatically from the TimeZone property of the server.
+	One way to set the default at the database level is with the SQL command
+	ALTER DATABASE <mydb> SET timezone TO 'UTC' "
+	
+	self ensureConnected.
+	^ self converter timezone id
 ]
 
 { #category : #accessing }
@@ -693,31 +1009,27 @@ P3Client >> serverVersion [
 
 { #category : #accessing }
 P3Client >> session [
-	
 	"Returns the current session identifier (backend process id) if connected"
 	
-	self isConnected ifFalse: [ session := nil ].
-	
+	self isConnected ifFalse: [ self clearSession ].
 	^ session
 ]
 
-{ #category : #private }
-P3Client >> setConnected [
-
-	settings at: #connected put: true
-]
-
-{ #category : #private }
+{ #category : #'initialize-release' }
 P3Client >> setSSL [
+	"Set a flag to make me use TLS/SSL when connecting to PostgrSQL.
+	The default is to use a plain unencrypted network connection."
+	
 	settings at: #ssl put: true
 ]
 
 { #category : #'error handling' }
 P3Client >> signal: exceptionClass using: info [
-	exceptionClass new 
-		info: info; 
-		messageText: (info at: $M);
-		signal
+	| exception |
+	(exception := exceptionClass new) 
+		info: info.
+	self logError: exception.
+	exception signal
 ]
 
 { #category : #'private messages' }
@@ -750,16 +1062,35 @@ P3Client >> timeout: seconds [
 	settings at: #timeout put: seconds
 ]
 
+{ #category : #accessing }
+P3Client >> timestampClass [
+	"Return the class used to create instances for TIMESTAMP WITH[OUT] TIME ZONE
+	by sending it #year:month:day:hour:minute:second:nanoSecond:offset:
+	The default is DateAndTime. A good alternative is ZTimestamp."
+	
+	^ settings at: #timestampClass ifAbsentPut: [ DateAndTime ]
+]
+
+{ #category : #'initialize-release' }
+P3Client >> timestampClass: timestampClass [
+	"Set the class used to create instances for TIMESTAMP WITH[OUT] TIME ZONE
+	by sending it #year:month:day:hour:minute:second:nanoSecond:offset:
+	The default is DateAndTime. A good alternative is ZTimestamp."
+	
+	settings at: #timestampClass put: timestampClass
+]
+
 { #category : #protocol }
 P3Client >> upgradeToSSL [
 	| reply |
+	self writeMessage: self sslRequestMessage.
 	reply := connection next asCharacter.
 	reply = $S
 		ifTrue: [ 
 			connection := ZdcSecureSocketStream on: connection socket.
 			connection connect ]
 		ifFalse: [ 
-			self error: 'PostgreSQL server did not honor SSL connection request' ]
+			P3Error postgreSQLServerDidNotHonorSSLConnectionRequest signal ]
 
 ]
 
@@ -767,31 +1098,35 @@ P3Client >> upgradeToSSL [
 P3Client >> url [
 	"Return my connection URL"
 	
-	^ ZnUrl new
+	| url |
+	(url := ZnUrl new)
 		scheme: #psql;
 		host: self host;
 		port: self port;
 		username: self user;
-		password: self password;
-		addPathSegments: (self database ifNotNil: [ { self database } ] ifNil: [ #() ]);
-		yourself
+		password: self password.
+	self database ifNotNil: [ url addPathSegment: self database ].
+	self isSSL ifTrue: [ url queryAt: #sslmode put: #require ].
+	^ url
 ]
 
 { #category : #'initialize-release' }
 P3Client >> url: stringOrUrl [
 	"Set my connection settings from stringOrUrl according to the format
-	psql://username:password@localhost:5432/databasename 
+	psql://username:password@localhost:5432/databasename?sslmode=require
 	with the minimum being psql://user@localhost"
 	
 	| url |
 	url := stringOrUrl asUrl.
-	self assert: url scheme = #psql.
+	self assert: (#(psql postgres postgresql) includes: url scheme).
 	self
 		host: url host;
 		port: (url portIfAbsent: [ 5432 ]);
 		user: url username;
 		password: url password;
-		database: url firstPathSegment 
+		database: url firstPathSegment.
+	(url queryAt: #sslmode ifAbsent: [ #disable ]) = #require
+		ifTrue: [ self setSSL ]
 ]
 
 { #category : #accessing }
@@ -810,9 +1145,40 @@ P3Client >> user: string [
 	settings at: #user put: string
 ]
 
+{ #category : #accessing }
+P3Client >> verbose: flag [
+	"Enable logging to the Transcript when flag is true.
+	Disable logging to the Transcript when flag is false.
+	Note that P3 uses object logging, with which you can do much more than output plain strings."
+	
+	flag
+		ifTrue: [ P3LogEvent logToTranscript ] 
+		ifFalse: [ P3LogEvent stopLoggingToTranscript ]
+]
+
+{ #category : #private }
+P3Client >> withConnection: block [
+	"Execute block, code that will use my connection.
+	Handle network errors with a retry/reconnection scheme"
+	
+	^ [ block value "first try" ] 
+		on: NetworkError 
+		do: [ 
+			self close. "first immediate retry"
+			self retryCount to: 1 by: -1 do: [ :remaining | 
+				[ ^ block value ]
+					on: NetworkError 
+					do: [ 
+						self close. "retry after wait"
+						self logRetryConnection: remaining.
+						self retryDelay seconds wait ] ].
+			block value "final unprotected try" ]
+]
+
 { #category : #'input/output' }
 P3Client >> writeDescribeMessage: aName type: aChar [
 	"Type $S to describe a prepared statement; or $P to describe a portal."
+	
 	| msgBuilder |
 	msgBuilder := self newMessageBuilder.
 	msgBuilder
@@ -825,7 +1191,7 @@ P3Client >> writeDescribeMessage: aName type: aChar [
 P3Client >> writeMessage: payload [
 	| size |
 	size := payload size + 4.
-	4 to: 1 by: -1 do: [ :index | connection nextPut: (size digitAt: index) ].
+	4 to: 1 by: -1 do: [ :index | connection nextPut: (size byteAt: index) ].
 	payload notEmpty 
 		ifTrue: [ connection nextPutAll: payload ].
 	connection flush
@@ -841,7 +1207,7 @@ P3Client >> writeMessage: payload tag: tag [
 P3Client >> writeMessageNoFlush: payload [
 	| size |
 	size := payload size + 4.
-	4 to: 1 by: -1 do: [ :index | connection nextPut: (size digitAt: index) ].
+	4 to: 1 by: -1 do: [ :index | connection nextPut: (size byteAt: index) ].
 	connection nextPutAll: payload.
 
 ]
@@ -872,15 +1238,15 @@ P3Client >> writeQueryMessage: queryString [
 	connection nextPut: $Q asInteger.
 	encoder := self converter encoder.
 	size := (encoder encodedByteCountForString: queryString) + 5.
-	4 to: 1 by: -1 do: [ :index | connection nextPut: (size digitAt: index) ].
+	4 to: 1 by: -1 do: [ :index | connection nextPut: (size byteAt: index) ].
 	queryString do: [ :each | encoder nextPut: each toStream: connection ].
 	connection nextPut: 0.
-	connection flush
+	connection flush.
+	self logQuery: queryString
 ]
 
 { #category : #'input/output' }
 P3Client >> writeSyncMessage [
-
 	self writeMessage: #[] tag: $S. 
 
 ]

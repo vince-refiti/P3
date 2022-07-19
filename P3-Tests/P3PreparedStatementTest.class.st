@@ -3,7 +3,7 @@ P3PreparedStatementTest holds unit tests for the P3PreparedStatement class.
 
 I reuse the configuration of P3ClientTests. Example:
 
-  P3ClientTests url: 'psql://sven:secret@localhost:5432/database'.
+  P3ClientTest url: 'psql://sven:secret@localhost:5432/database'.
 "
 Class {
 	#name : #P3PreparedStatementTest,
@@ -11,20 +11,8 @@ Class {
 	#instVars : [
 		'client'
 	],
-	#classVars : [
-		'Url'
-	],
 	#category : #'P3-Tests'
 }
-
-{ #category : #testing }
-P3PreparedStatementTest >> isServerVersionAtLeastMajor: major minor: minor [
-	| serverVersion |
-	serverVersion := ($. split: client serverVersion) collect: #asNumber.
-	^ serverVersion first > major
-		or:
-			[ serverVersion first = major and: [ serverVersion second >= minor ] ]
-]
 
 { #category : #running }
 P3PreparedStatementTest >> setUp [
@@ -61,6 +49,8 @@ P3PreparedStatementTest >> testBatchInsertStatement [
 		self assert: each equals: 'INSERT 0 1' ].
 	
 	statement close.
+	
+	client execute: 'DROP TABLE table1'
 ]
 
 { #category : #tests }
@@ -83,6 +73,7 @@ P3PreparedStatementTest >> testBinaryColumn [
 	self assert: #( #[ 100 102 104 200 255 0 1 2 ] ) equals: (result at: 1) firstRecord.
 	self assert: #( #[ 100 102 104 106 108 100 102 104 106 108 ] ) equals: (result at: 2) firstRecord.
 	
+	client execute: 'DROP TABLE table1'
 ]
 
 { #category : #tests }
@@ -132,12 +123,93 @@ P3PreparedStatementTest >> testBulkInsertAndSelect [
 
 	insertStatement close.
 	selectStatement close.
+	
+	client execute: 'DROP TABLE table1'
+]
+
+{ #category : #tests }
+P3PreparedStatementTest >> testChronology [
+	| result statement now |
+	client execute: 'DROP TABLE IF EXISTS table1'.
+	client execute: 'CREATE TABLE table1 (id SERIAL PRIMARY KEY, name TEXT, timestamp_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP, date_created DATE DEFAULT CURRENT_DATE, time_created TIME DEFAULT CURRENT_TIME)'.
+	statement := client prepare: 'INSERT INTO table1 (name) VALUES ($1)'.
+	statement execute: { 'Chronology' }.
+	statement close.
+	result := client query: 'SELECT id, name, timestamp_created, date_created, time_created FROM table1 WHERE id = 1'.
+	self assert: result firstRecord first equals: 1.
+	self assert: result firstRecord second equals: 'Chronology'.
+	now := DateAndTime now asUTC.
+	now := now offset: (client converter timezone offsetForTimestamp: now).
+	self assert: (now - result firstRecord third) abs < 30 seconds.
+	self assert: (now asDate equals: result firstRecord fourth).
+	self assert: (now asTime asSeconds - result firstRecord fifth asSeconds) abs < 30.
+	statement := client prepare: 'INSERT INTO table1 (name, timestamp_created, date_created, time_created) VALUES ($1, $2, $3, $4)'.
+	statement execute: { 'Pharo'. now. now asDate. now asTime }.
+	statement close.
+	result := client query: 'SELECT id, name, timestamp_created, date_created, time_created FROM table1 WHERE id = 2'.
+	self assert: result firstRecord first equals: 2.
+	self assert: result firstRecord second equals: 'Pharo'.
+	self assert: (now - result firstRecord third) abs < 30 seconds.
+	self assert: (now asDate equals: result firstRecord fourth).
+	self assert: (now asTime asSeconds - result firstRecord fifth asSeconds) abs < 30.
+	client execute: 'DROP TABLE table1'
+]
+
+{ #category : #tests }
+P3PreparedStatementTest >> testChronologyWithTimezone [
+	| result statement now |
+	client execute: 'DROP TABLE IF EXISTS table1'.
+	client execute: 'CREATE TABLE table1 (id SERIAL PRIMARY KEY, name TEXT, timestamp_created TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, date_created DATE DEFAULT CURRENT_DATE, time_created TIME WITH TIME ZONE DEFAULT CURRENT_TIME)'.
+	statement := client prepare: 'INSERT INTO table1 (name) VALUES ($1)'.
+	statement execute: { 'Chronology' }.
+	statement close.
+	result := client query: 'SELECT id, name, timestamp_created, date_created, time_created FROM table1 WHERE id = 1'.
+	self assert: result firstRecord first equals: 1.
+	self assert: result firstRecord second equals: 'Chronology'.
+	now := DateAndTime now asUTC.
+	now := now offset: (client converter timezone offsetForTimestamp: now).
+	self assert: (now - result firstRecord third) abs < 30 seconds.
+	self assert: (now asDate equals: result firstRecord fourth).
+	self assert: (now asTime asSeconds - result firstRecord fifth asSeconds) abs < 30.
+	statement := client prepare: 'INSERT INTO table1 (name, timestamp_created, date_created, time_created) VALUES ($1, $2, $3, $4)'.
+	statement execute: { 'Pharo'. now. now asDate. now asTime }.
+	statement close.
+	result := client query: 'SELECT id, name, timestamp_created, date_created, time_created FROM table1 WHERE id = 2'.
+	self assert: result firstRecord first equals: 2.
+	self assert: result firstRecord second equals: 'Pharo'.
+	self assert: (now - result firstRecord third) abs < 30 seconds.
+	self assert: (now asDate equals: result firstRecord fourth).
+	self assert: (now asTime asSeconds - result firstRecord fifth asSeconds) abs < 30.
+	client execute: 'DROP TABLE table1'
+]
+
+{ #category : #tests }
+P3PreparedStatementTest >> testChronologyZTimestamp [
+	| result statement |
+	client close; timestampClass: ZTimestamp.
+	client execute: 'DROP TABLE IF EXISTS table1'.
+	client execute: 'CREATE TABLE table1 (id SERIAL PRIMARY KEY, name TEXT, timestamp_created TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)'.
+	statement := client prepare: 'INSERT INTO table1 (name) VALUES ($1)'.
+	statement execute: { 'Chronology' }.
+	statement close.
+	result := client query: 'SELECT id, name, timestamp_created FROM table1 WHERE id = 1'.
+	self assert: result firstRecord first equals: 1.
+	self assert: result firstRecord second equals: 'Chronology'.
+	self assert: (ZTimestamp now - result firstRecord third) abs < 30 seconds.
+	statement := client prepare: 'INSERT INTO table1 (name, timestamp_created) VALUES ($1, $2)'.
+	statement execute: { 'Pharo'. ZTimestamp now }.
+	statement close.
+	result := client query: 'SELECT id, name, timestamp_created FROM table1 WHERE id = 2'.
+	self assert: result firstRecord first equals: 2.
+	self assert: result firstRecord second equals: 'Pharo'.
+	self assert: (ZTimestamp now - result firstRecord third) abs < 30 seconds.
+	client execute: 'DROP TABLE table1'
 ]
 
 { #category : #tests }
 P3PreparedStatementTest >> testGeometricTypes [
 	| p1 p2 p3 points row1 row2 row3 statement result |
-	(self isServerVersionAtLeastMajor: 9 minor: 4) ifFalse: [ ^ self skip ].
+	(client isServerVersionAtLeastMajor: 9 minor: 4) ifFalse: [ ^ self skip ].
 	
 	client execute: 'DROP TABLE IF EXISTS table1'.
 	client execute: 'CREATE TABLE table1 (id SERIAL, p POINT, b BOX, c CIRCLE, l1 LINE, l2 LSEG, p1 POLYGON, p2 PATH)'.
@@ -163,6 +235,35 @@ P3PreparedStatementTest >> testGeometricTypes [
 ]
 
 { #category : #tests }
+P3PreparedStatementTest >> testInClause [
+	| statement result |
+	
+	client execute: 'DROP TABLE IF EXISTS table1'.
+	client execute: 'CREATE TABLE table1 (id INTEGER, name TEXT)'.
+	
+	statement := client prepare: 'INSERT INTO table1 (id, name) VALUES ($1,$2)'.
+	statement executeBatch: #(
+		( 1 'Hello World' )
+		( 2 'Greetings' )
+		( 3 'From Mars' )	).
+	statement close.
+	
+	statement := client prepare: 'SELECT id, name FROM table1 WHERE id = ANY ($1) ORDER BY id'.
+
+	result := statement query: { P3ValuesArray withAll: #( 2 3 ) }.
+	self assert: result records equals: #( (2 'Greetings') (3 'From Mars') ).
+	
+	result := statement query: { P3ValuesArray withAll: #( 3 ) }.
+	self assert: result records equals: #( (3 'From Mars') ).
+	
+	result := statement query: { P3ValuesArray withAll: #( 666 ) }.
+	self assert: result records equals: #( ).
+	
+	statement close.
+	client execute: 'DROP TABLE table1'.
+]
+
+{ #category : #tests }
 P3PreparedStatementTest >> testInsertNull [
 
 	| statement result |
@@ -181,6 +282,60 @@ P3PreparedStatementTest >> testInsertNull [
 		self assert: each equals: 'INSERT 0 1' ].
 	
 	statement close.
+	
+	client execute: 'DROP TABLE table1'
+]
+
+{ #category : #tests }
+P3PreparedStatementTest >> testInterval [
+	| statement intervals result |
+	
+	client execute: 'DROP TABLE IF EXISTS table1'.
+	client execute: 'CREATE TABLE table1 (id SERIAL, time_interval INTERVAL)'.
+	
+	intervals := { { P3Interval zero }. { P3Interval years: 1 months: 2 days: 3 hours: 4 minutes: 5 seconds: 6 } }.
+	
+	statement := client prepare: 'INSERT INTO table1 (time_interval) VALUES ($1)'.
+	statement executeBatch: intervals.
+	
+	result := client query: 'SELECT time_interval FROM table1 ORDER BY id'.	
+	self assert: result data equals: intervals.
+	
+	client execute: 'DROP TABLE table1'
+]
+
+{ #category : #tests }
+P3PreparedStatementTest >> testLongQueries [
+	"Test fix for issue: Prepared statements error when query is long and differs slightly at the end
+	https://github.com/svenvc/P3/issues/20"
+
+	| statement select1 select2 result |
+	
+	client execute: 'DROP TABLE IF EXISTS table1'.
+	client execute: 'CREATE TABLE table1 (id INTEGER, name TEXT, enabled BOOLEAN)'.
+	
+	statement := client prepare: 'INSERT INTO table1 (id, name, enabled) VALUES ($1,$2,$3)'.
+	statement executeBatch: #(
+		( 123 'Hello World' true )
+		( 345 'Greetings' false )
+		( 567 'From Mars' true )	).
+	statement close.
+	
+	select1 := client prepare: 'SELECT name, enabled FROM table1 /* long and boring piece of comment */ WHERE id >= $1 order by id'.
+	select2 := client prepare: 'SELECT name, enabled FROM table1 /* long and boring piece of comment */ WHERE id < $1 order by id'.
+
+	result := select1 query: #( 345 ).
+	self assert: result records equals: #( ('Greetings' false) ('From Mars' true ) ).
+	
+	result := select2 query: #( 345 ).
+	self assert: result records equals: #( ('Hello World' true ) ).
+	self assert: select1 name size < 64.
+	
+	statement close.
+	select1 close.
+	select2 close.
+	
+	client execute: 'DROP TABLE table1'
 ]
 
 { #category : #tests }
@@ -202,7 +357,44 @@ P3PreparedStatementTest >> testMultipleInsertStatements [
 	statement1 close.
 	statement2 close.
 	
+	client execute: 'DROP TABLE table1; DROP TABLE table2'
+	
 
+]
+
+{ #category : #tests }
+P3PreparedStatementTest >> testNamedPreparedStatement [
+	| result |
+	
+	client execute: 'DROP TABLE IF EXISTS table1'.
+	client execute: 'CREATE TABLE table1 (id INTEGER, name TEXT, enabled BOOLEAN)'.
+	
+	client 
+		prepare: 'INSERT INTO table1 (id, name, enabled) VALUES ($1,$2,$3)'
+		named: 'table1_insert1'.
+	(client preparedStatementNamed: 'table1_insert1') executeBatch: #(
+		( 123 'Hello World' true )
+		( 345 'Greetings' false )
+		( 567 'From Mars' true )	).
+	(client preparedStatementNamed: 'table1_insert1') close.
+	self should: [ client preparedStatementNamed: 'table1_insert1' ] raise: NotFound.
+	
+	client 
+		prepare: 'SELECT name, enabled FROM table1 where id >= $1 order by id'
+		named: 'table1_select1'.
+
+	result := (client preparedStatementNamed: 'table1_select1') query: #( 345 ).
+	self assert: result records equals: #( ('Greetings' false) ('From Mars' true ) ).
+	
+	result := (client preparedStatementNamed: 'table1_select1') query: #( 567 ).
+	self assert: result records equals: #( ('From Mars' true ) ).
+	
+	result := (client preparedStatementNamed: 'table1_select1') query: #( 800 ).
+	self assert: result records equals: #( ).
+	
+	(client preparedStatementNamed: 'table1_select1') close.
+	
+	client execute: 'DROP TABLE table1'
 ]
 
 { #category : #tests }
@@ -228,6 +420,7 @@ P3PreparedStatementTest >> testScaledDecimal [
 	self assert: (result data collect: [ :row | row first asScaledDecimal ]) asArray
 		equals: #( 100 100.12s2 100.12s2 100.12s2 100.13s2 ).
 	
+	client execute: 'DROP TABLE table1'
 
 
 ]
@@ -259,6 +452,8 @@ P3PreparedStatementTest >> testSelectStatement [
 	self assert: result records equals: #( ).
 	
 	statement close.
+	
+	client execute: 'DROP TABLE table1'
 ]
 
 { #category : #tests }
@@ -281,4 +476,6 @@ P3PreparedStatementTest >> testSimpleInsertStatement [
 	
 	result := client query: 'SELECT id, name, enabled FROM table1 ORDER BY id'.
 	self assert: result records size equals: 4.
+	
+	client execute: 'DROP TABLE table1'
 ]

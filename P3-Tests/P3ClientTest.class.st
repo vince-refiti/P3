@@ -31,11 +31,11 @@ Class {
 { #category : #accessing }
 P3ClientTest class >> url [
 	"Return the default connection URL to use for P3 clients in the unit tests.
-	Note that the default here corresponds to the default on Travis CI's postgresql service,
-	user postgres with a blank password on localhost.
+	Note that the coded default here corresponds to the GitHub Action CI's postgresql service:
+	user postgres with password postgres, host postgres, port 5432 and databasse postgres. 
 	You should set an appropriate connection string yourself, see #url:"
 	
-	^ Url ifNil: [ Url := 'psql://postgres@localhost' ]
+	^ Url ifNil: [ Url := 'psql://postgres:postgres@postgres:5432/postgres' ]
 ]
 
 { #category : #accessing }
@@ -50,15 +50,6 @@ P3ClientTest class >> url: stringOrUrl [
 { #category : #benchmarking }
 P3ClientTest >> benchmark1Size [
 	^ 10000
-]
-
-{ #category : #testing }
-P3ClientTest >> isServerVersionAtLeastMajor: major minor: minor [
-	| serverVersion |
-	serverVersion := ($. split: client serverVersion) collect: #asNumber.
-	^ serverVersion first > major
-		or:
-			[ serverVersion first = major and: [ serverVersion second >= minor ] ]
 ]
 
 { #category : #benchmarking }
@@ -202,30 +193,58 @@ P3ClientTest >> testByteArrayConversion [
 
 { #category : #tests }
 P3ClientTest >> testChronology [
-	| result |
+	| result now |
 	client execute: 'DROP TABLE IF EXISTS table1'.
 	client execute: 'CREATE TABLE table1 (id SERIAL PRIMARY KEY, name TEXT, timestamp_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP, date_created DATE DEFAULT CURRENT_DATE, time_created TIME DEFAULT CURRENT_TIME)'.
 	client execute: 'INSERT INTO table1 (name) VALUES (''Chronology'')'.
 	result := client query: 'SELECT id, name, timestamp_created, date_created, time_created FROM table1 WHERE id = 1'.
 	self assert: result firstRecord first equals: 1.
 	self assert: result firstRecord second equals: 'Chronology'.
-	self assert: (DateAndTime now - result firstRecord third) abs < 30 seconds.
-	self assert: (Date today - result firstRecord fourth) abs < 30 seconds.
-	self assert: (Time now asSeconds - result firstRecord fifth asSeconds) abs < 30.
+	now := DateAndTime now asUTC.
+	now := now offset: (client converter timezone offsetForTimestamp: now).
+	self assert: (now - result firstRecord third) abs < 30 seconds.
+	self assert: (now asDate equals: result firstRecord fourth).
+	self assert: (now asTime asSeconds - result firstRecord fifth asSeconds) abs < 30.
 	client execute: ('INSERT INTO table1 (name, timestamp_created, date_created, time_created) VALUES (''{1}'', ''{2}'', ''{3}'', ''{4}'')'
-		format: { 'Pharo'. DateAndTime now. Date today. Time now }).
+		format: { 'Pharo'. now. now asDate. now asTime }).
 	result := client query: 'SELECT id, name, timestamp_created, date_created, time_created FROM table1 WHERE id = 2'.
 	self assert: result firstRecord first equals: 2.
 	self assert: result firstRecord second equals: 'Pharo'.
-	self assert: (DateAndTime now - result firstRecord third) abs < 30 seconds.
-	self assert: (Date today - result firstRecord fourth) abs < 30 seconds.
-	self assert: (Time now asSeconds - result firstRecord fifth asSeconds) abs < 30.
+	self assert: (now - result firstRecord third) abs < 30 seconds.
+	self assert: (now asDate equals: result firstRecord fourth).
+	self assert: (now asTime asSeconds - result firstRecord fifth asSeconds) abs < 30.
+	client execute: 'DROP TABLE table1'
+]
+
+{ #category : #tests }
+P3ClientTest >> testChronologyWithTimezone [
+	| result now |
+	client execute: 'DROP TABLE IF EXISTS table1'.
+	client execute: 'CREATE TABLE table1 (id SERIAL PRIMARY KEY, name TEXT, timestamp_created TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, date_created DATE DEFAULT CURRENT_DATE, time_created TIME WITH TIME ZONE DEFAULT CURRENT_TIME)'.
+	client execute: 'INSERT INTO table1 (name) VALUES (''Chronology'')'.
+	result := client query: 'SELECT id, name, timestamp_created, date_created, time_created FROM table1 WHERE id = 1'.
+	self assert: result firstRecord first equals: 1.
+	self assert: result firstRecord second equals: 'Chronology'.
+	now := DateAndTime now asUTC.
+	now := now offset: (client converter timezone offsetForTimestamp: now).
+	self assert: (now - result firstRecord third) abs < 30 seconds.
+	self assert: (now asDate equals: result firstRecord fourth).
+	self assert: (now asTime asSeconds - result firstRecord fifth asSeconds) abs < 30.
+	client execute: ('INSERT INTO table1 (name, timestamp_created, date_created, time_created) VALUES (''{1}'', ''{2}'', ''{3}'', ''{4}'')'
+		format: { 'Pharo'. now. now asDate. now asTime }).
+	result := client query: 'SELECT id, name, timestamp_created, date_created, time_created FROM table1 WHERE id = 2'.
+	self assert: result firstRecord first equals: 2.
+	self assert: result firstRecord second equals: 'Pharo'.
+	self assert: (now - result firstRecord third) abs < 30 seconds.
+	self assert: (now asDate equals: result firstRecord fourth).
+	self assert: (now asTime asSeconds - result firstRecord fifth asSeconds) abs < 30.
 	client execute: 'DROP TABLE table1'
 ]
 
 { #category : #tests }
 P3ClientTest >> testCircleConversion [
 	| result |
+	(client isServerVersionAtLeastMajor: 9 minor: 4) ifFalse: [ ^ self skip ].
 	result := client query: 'SELECT circle ''<(1,2),100>'''.
 	self 
 		assert: result firstFieldOfFirstRecord 
@@ -302,10 +321,64 @@ P3ClientTest >> testIntegerConversion [
 ]
 
 { #category : #tests }
+P3ClientTest >> testIntegerVector [
+
+	| result statement |
+	client execute: 'DROP TABLE IF EXISTS table1'.
+	client execute: 'CREATE TABLE table1 (id INTEGER, v oidvector)'.
+	client execute:
+		'INSERT INTO table1 (id, v) VALUES (1, ''0 1 2 3 4 5 67890 1234567'')'.
+	result := client query: 'SELECT id, v FROM table1 WHERE id = 1'.
+	self
+		assert: result firstRecord
+		equals: #( 1 #( 0 1 2 3 4 5 67890 1234567 ) ).
+
+
+	"statement := client prepare:
+		             'INSERT INTO table1 (id, v) VALUES ($1, $2)'.
+	statement execute: { 
+			1.
+			#( 77 1974 1945 ) }.
+			
+	result := client query: 'SELECT id, v FROM table1 WHERE id = 2'.
+	self assert: result firstRecord equals: { 
+			2.
+			#( 77 1974 1945 ) }."
+
+	client execute: 'DROP TABLE table1'
+]
+
+{ #category : #tests }
+P3ClientTest >> testIntervalConversion [
+	| result |
+	result := client query: 'SELECT INTERVAL ''1 years 1 mons 1 days 1 hours 1 minutes 1 seconds'''.
+	self 
+		assert: result firstFieldOfFirstRecord 
+		equals: (P3Interval years: 1 months: 1 days: 1 hours: 1 minutes: 1 seconds: 1).
+	result := client query: 'SELECT INTERVAL ''0 seconds'''.
+	self 
+		assert: result firstFieldOfFirstRecord 
+		equals: (P3Interval zero).
+	result := client query: 'SELECT INTERVAL ''1 years 2 mons 3 days 0 hours 0 minutes 0 seconds'''.
+	self 
+		assert: result firstFieldOfFirstRecord 
+		equals: (P3Interval years: 1 months: 2 days: 3 hours: 0 minutes: 0 seconds: 0).
+	result := client query: 'SELECT INTERVAL ''1 hours 2 minutes 3 seconds'''.
+	self 
+		assert: result firstFieldOfFirstRecord 
+		equals: (P3Interval years: 0 months: 0 days: 0 hours: 1 minutes: 2 seconds: 3).
+	result := client query: 'SELECT INTERVAL ''1 years 1 mons 1 days 1 hours 1 minutes 1 seconds ago'''.
+	self 
+		assert: result firstFieldOfFirstRecord 
+		equals: (P3Interval years: -1 months: -1 days: -1 hours: -1 minutes: 1 seconds: 1).
+
+]
+
+{ #category : #tests }
 P3ClientTest >> testJsonConversion [
 	| data result |
 	
-	(self isServerVersionAtLeastMajor: 9 minor: 5) ifFalse: [ ^ self skip ].
+	(client isServerVersionAtLeastMajor: 9 minor: 5) ifFalse: [ ^ self skip ].
 	data := NeoJSONObject new 
 		x: 1; 
 		str: 'les élève Français'; 
@@ -321,7 +394,7 @@ P3ClientTest >> testJsonConversion [
 { #category : #tests }
 P3ClientTest >> testLineConversion [
 	| result |
-	(self isServerVersionAtLeastMajor: 9 minor: 4) ifFalse: [ ^ self skip ].
+	(client isServerVersionAtLeastMajor: 9 minor: 4) ifFalse: [ ^ self skip ].
 	result := client query: 'SELECT line''{1,2,3}'''.
 	self 
 		assert: result firstFieldOfFirstRecord 
@@ -367,6 +440,23 @@ P3ClientTest >> testMultiStatement [
 	self assert: result firstRowCount equals: 2.
 	self assert: result data equals: #((1 'foo' true)(2 'bar' false)).
 	client execute: 'DROP TABLE table1'
+]
+
+{ #category : #tests }
+P3ClientTest >> testMultipleCommandsInOneRequest [
+	| result |
+	result := client query: 'SELECT 100'.
+	self assert: result firstFieldOfFirstRecord equals: 100.
+	self assert: result results equals: 'SELECT 1'.
+	self assert: result firstResult equals: 'SELECT 1'.
+	result := client query: 'SELECT 100; SELECT 200'.
+	self assert: result firstFieldOfFirstRecord equals: 200.
+	self assert: result results equals: #('SELECT 1' 'SELECT 1').
+	self assert: result lastResult equals: 'SELECT 1'.
+	result := client query: 'SELECT 10; SELECT 20; SELECT 30'.
+	self assert: result firstFieldOfFirstRecord equals: 30.
+	self assert: result results equals: #('SELECT 1' 'SELECT 1' 'SELECT 1').
+	self assert: result lastResult equals: 'SELECT 1'
 ]
 
 { #category : #tests }
@@ -533,11 +623,35 @@ P3ClientTest >> testStringEscaping [
 ]
 
 { #category : #tests }
+P3ClientTest >> testTimeConversion [
+	| result offset formattedOffset |
+	"TIME WITHOUT TIME ZONE maps 1 on 1"
+	result := client query: 'SELECT TIME ''01:02:03'''.
+	self assert: result firstFieldOfFirstRecord equals: (Time hour: 1 minute: 2 second: 3).
+	"Figure out the offset of the connection's time zone"
+	offset := client converter timezone offsetForTimestamp: ZTimestamp today.
+	formattedOffset := String streamContents: [ :out |
+		out nextPut: (offset positive ifTrue: [ $+ ] ifFalse: [ $- ]).
+		offset hours printOn: out base: 10 length: 2 padded: true.
+		out nextPut: $:.
+		offset minutes printOn: out base: 10 length: 2 padded: true ].
+	"TIME WITH TIME ZONE does not change when the time zone matches"
+	result := client query: 'SELECT TIMETZ ''01:02:03' , formattedOffset , ''''.
+	self assert: result firstFieldOfFirstRecord equals: (Time hour: 1 minute: 2 second: 3).
+	"TIME WITH TIME ZONE is shifted when the time zone differs"
+	result := client query: 'SELECT TIMETZ ''01:02:03+00:00'''.
+	self 
+		assert: result firstFieldOfFirstRecord 
+		equals: ((Time hour: 1 minute: 2 second: 3) addTime: offset).
+]
+
+{ #category : #tests }
 P3ClientTest >> testTimeout [
 	"Reconnect with an explicit timeout"
 	client close.
 	client url: Url.
 	client timeout: 1. "second"
+	client retryCount: 0; retryDelay: 0. "make sure there is no retry waiting"
 	self assert: client isWorking.
 	"The following (sleeping for 0.5 seconds) should just pass successfully"
 	client execute: 'SELECT pg_sleep(0.5)'.
@@ -577,6 +691,39 @@ P3ClientTest >> testTimezone [
 ]
 
 { #category : #tests }
+P3ClientTest >> testTimezoneZTimestamp [
+	| result originalTimezone |
+	client close; timestampClass: ZTimestamp.
+	client execute: 'DROP TABLE IF EXISTS table1'.
+	client execute: 'CREATE TABLE table1 (id SERIAL PRIMARY KEY, name TEXT, t1 TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP, t2 TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)'.
+	originalTimezone := client converter timezone id.
+	client execute: ('INSERT INTO table1 (name) VALUES (''{1}'')' format: { originalTimezone }).
+	result := client query: 'SELECT id, name, t1, t2 FROM table1 WHERE id = 1'.
+	self assert: result firstRecord first equals: 1.
+	self assert: result firstRecord second equals: client converter timezone id.
+	self assert: (ZTimestamp now - result firstRecord third) abs < 30 seconds.
+	self assert: (ZTimestamp now - result firstRecord fourth) abs < 30 seconds.
+	client execute: 'SET TIMEZONE TO ''GMT'''.
+	result := client query: 'SHOW TIMEZONE'.
+	self assert: result firstFieldOfFirstRecord equals: 'GMT'.
+	client converter timezone: ZTimezone gmt.
+	client execute: ('INSERT INTO table1 (name) VALUES (''{1}'')' format: { client converter timezone id }).
+	result := client query: 'SELECT id, name, t1, t2 FROM table1 WHERE id = 1'.
+	self assert: result firstRecord first equals: 1.
+	"t1 is now off, since postgres did not adjust it"
+	self assert: (((ZTimezone id: originalTimezone) gmtToLocal: ZTimestamp now) - result firstRecord third) abs < 30 seconds.
+	self assert: (ZTimestamp now - result firstRecord fourth) abs < 30 seconds.
+	result := client query: 'SELECT id, name, t1, t2 FROM table1 WHERE id = 2'.
+	self assert: result firstRecord first equals: 2.
+	self assert: result firstRecord second equals: client converter timezone id.
+	self assert: (ZTimestamp now - result firstRecord third) abs < 30 seconds.
+	self assert: (ZTimestamp now - result firstRecord fourth) abs < 30 seconds.
+	client execute: ('SET TIMEZONE TO ''{1}''' format: { originalTimezone }).
+	client converter timezone: (ZTimezone id: originalTimezone).
+	client execute: 'DROP TABLE table1'
+]
+
+{ #category : #tests }
 P3ClientTest >> testUuid [
 
 	| result uuid num |
@@ -593,4 +740,93 @@ P3ClientTest >> testUuid [
 	self assert: result firstRecord equals: { uuid. num }.
 	
 	client execute: 'DROP TABLE testUUID'
+]
+
+{ #category : #tests }
+P3ClientTest >> testValuesArray1 [
+	| statement result |
+	client execute: 'DROP TABLE IF EXISTS table_a'.
+	client execute: 'CREATE TABLE table_a (id INTEGER, name TEXT, text_a TEXT[], int_a INTEGER[])'.
+	statement := client format: 'INSERT INTO table_a (id, name, text_a, int_a) VALUES ($1, $2, $3, $4)'.
+	statement execute: { 1. 'foo'. P3ValuesArray withAll: #('foo' 'bar'). P3ValuesArray withAll: #(1 2) }.
+	statement execute: { 2. 'null'. P3ValuesArray withAll: #('NULL' nil). P3ValuesArray withAll: #(0 nil) }.
+	statement execute: { 3. 'zero'. P3ValuesArray empty. P3ValuesArray empty }.
+	statement execute: { 4. 'escape'. P3ValuesArray withAll: #('a"b' 'c\d'). P3ValuesArray withAll: #(1 2) }.
+	result := client query: 'SELECT id, name, text_a, int_a FROM table_a WHERE id = 1'.
+	self assert: result firstRecord equals: #(1 'foo' #('foo' 'bar') #(1 2)).
+	result := client query: 'SELECT id, name, text_a, int_a FROM table_a WHERE id = 2'.
+	self assert: result firstRecord equals: #(2 'null' #('NULL' nil) #(0 nil)).
+	result := client query: 'SELECT id, name, text_a, int_a FROM table_a WHERE id = 3'.
+	self assert: result firstRecord equals: #(3 'zero' #() #()).
+	result := client query: 'SELECT id, name, text_a, int_a FROM table_a WHERE id = 4'.
+	self assert: result firstRecord equals: #(4 'escape' #('a"b' 'c\d') #(1 2)).
+	client execute: 'DROP TABLE table_a'
+]
+
+{ #category : #tests }
+P3ClientTest >> testValuesArray2 [
+	| statement result |
+	client execute: 'DROP TABLE IF EXISTS table_a'.
+	client execute: 'CREATE TABLE table_a (id INTEGER, name TEXT, text_a TEXT[], int_a INTEGER[])'.
+	statement := client prepare: 'INSERT INTO table_a (id, name, text_a, int_a) VALUES ($1, $2, $3, $4)'.
+	statement execute: { 1. 'foo'. P3ValuesArray withAll: #('foo' 'bar'). P3ValuesArray withAll: #(1 2) }.
+	"statement execute: { 2. 'null'. P3ValuesArray withAll: #('NULL' nil). P3ValuesArray withAll: #(0 nil) }."
+	statement execute: { 3. 'zero'. P3ValuesArray empty. P3ValuesArray empty }.
+	"statement execute: { 4. 'escape'. P3ValuesArray withAll: #('a""b' 'c\d'). P3ValuesArray withAll: #(1 2) }."
+	result := client query: 'SELECT id, name, text_a, int_a FROM table_a WHERE id = 1'.
+	self assert: result firstRecord equals: #(1 'foo' #('foo' 'bar') #(1 2)).
+	"result := client query: 'SELECT id, name, text_a, int_a FROM table_a WHERE id = 2'.
+	self assert: result firstRecord equals: #(2 'null' #('NULL' nil) #(0 nil))."
+	result := client query: 'SELECT id, name, text_a, int_a FROM table_a WHERE id = 3'.
+	self assert: result firstRecord equals: #(3 'zero' #() #()).
+	"result := client query: 'SELECT id, name, text_a, int_a FROM table_a WHERE id = 4'.
+	self assert: result firstRecord equals: #(4 'escape' #('a""b' 'c\d') #(1 2))."
+	client execute: 'DROP TABLE table_a'
+]
+
+{ #category : #tests }
+P3ClientTest >> testZTimestamp [
+	| result |
+	client close; timestampClass: ZTimestamp.
+	client execute: 'DROP TABLE IF EXISTS table1'.
+	client execute: 'CREATE TABLE table1 (id SERIAL PRIMARY KEY, name TEXT, timestamp_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP)'.
+	client execute: 'INSERT INTO table1 (name) VALUES (''Chronology'')'.
+	result := client query: 'SELECT id, name, timestamp_created FROM table1 WHERE id = 1'.
+	self assert: result firstRecord first equals: 1.
+	self assert: result firstRecord second equals: 'Chronology'.
+	"For TIMESTAMP WITHOUT TIMEZONE, CURRENT_TIMESTAMP looks at the TIMEZONE set for the session and inserts those values as such,
+	Postgres will not do any conversions, not at insert time, not at query time. P3 will assume the TIMEZONE of the session is
+	still correct and applies the offset, keeping the same UTC timestamp"
+	self assert: (ZTimestamp now - result firstRecord third) abs < 30 seconds.
+	"When inserting into a TIMESTAMP WITHOUT TIMEZONE Postgres will do no conversions and assume you know what you are doing,
+	which means that we have to supply a timestamp with values matching the TIMEZONE set for the session"
+	client execute: ('INSERT INTO table1 (name, timestamp_created) VALUES (''{1}'', ''{2}'')'
+		format: { 'Pharo'. client converter timezone gmtToLocal: ZTimestamp now }).
+	result := client query: 'SELECT id, name, timestamp_created FROM table1 WHERE id = 2'.
+	self assert: result firstRecord first equals: 2.
+	self assert: result firstRecord second equals: 'Pharo'.
+	"P3 will assume the TIMEZONE of the session is still correct and apply the offset, keeping the same UTC timestamp,
+	it basically does a #gmtToLocal:"
+	self assert: (ZTimestamp now - result firstRecord third) abs < 30 seconds.
+	client execute: 'DROP TABLE table1'
+]
+
+{ #category : #tests }
+P3ClientTest >> testZTimestampWithTimezone [
+	| result |
+	client close; timestampClass: ZTimestamp.
+	client execute: 'DROP TABLE IF EXISTS table1'.
+	client execute: 'CREATE TABLE table1 (id SERIAL PRIMARY KEY, name TEXT, timestamp_created TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)'.
+	client execute: 'INSERT INTO table1 (name) VALUES (''Chronology'')'.
+	result := client query: 'SELECT id, name, timestamp_created FROM table1 WHERE id = 1'.
+	self assert: result firstRecord first equals: 1.
+	self assert: result firstRecord second equals: 'Chronology'.
+	self assert: (ZTimestamp now - result firstRecord third) abs < 30 seconds.
+	client execute: ('INSERT INTO table1 (name, timestamp_created) VALUES (''{1}'', ''{2}'')'
+		format: { 'Pharo'. ZTimestamp now }).
+	result := client query: 'SELECT id, name, timestamp_created FROM table1 WHERE id = 2'.
+	self assert: result firstRecord first equals: 2.
+	self assert: result firstRecord second equals: 'Pharo'.
+	self assert: (ZTimestamp now - result firstRecord third) abs < 30 seconds.
+	client execute: 'DROP TABLE table1'
 ]
