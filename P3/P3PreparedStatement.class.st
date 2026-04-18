@@ -34,24 +34,27 @@ My API and the syntax that I use ($n) is mostly polymorphic with P3FormattedStat
 
 "
 Class {
-	#name : #P3PreparedStatement,
-	#superclass : #Object,
+	#name : 'P3PreparedStatement',
+	#superclass : 'Object',
 	#instVars : [
 		'client',
 		'name',
 		'paramDescriptions',
-		'fieldDescriptions'
+		'fieldDescriptions',
+		'source'
 	],
-	#category : #'P3-Core'
+	#category : 'P3-Core',
+	#package : 'P3',
+	#tag : 'Core'
 }
 
-{ #category : #'instance creation' }
+{ #category : 'instance creation' }
 P3PreparedStatement class >> newWith: aClient name: aString parameters: paramDescriptions fields: rowDescriptions [
 
 	^ self new initializeWith: aClient name: aString parameters: paramDescriptions fields: rowDescriptions
 ]
 
-{ #category : #'input/output' }
+{ #category : 'input/output' }
 P3PreparedStatement >> bindStrings: inputValues [
 
 	| msgBuilder |
@@ -77,7 +80,7 @@ P3PreparedStatement >> bindStrings: inputValues [
 	client logBinding: self inputValues: inputValues
 ]
 
-{ #category : #public }
+{ #category : 'public' }
 P3PreparedStatement >> close [
 	"Close this query and release server side resources."
 
@@ -95,16 +98,17 @@ P3PreparedStatement >> close [
 	client := nil
 ]
 
-{ #category : #accessing }
+{ #category : 'accessing' }
 P3PreparedStatement >> converter [ 
 	^ client converter
 ]
 
-{ #category : #public }
+{ #category : 'public' }
 P3PreparedStatement >> execute: inputRow [
 	"Execute this SQL query with inputRow as the ordered collection of parameters.
 	Assume no rows will be returned."
 
+	client setSource: self source.
 	self bindStrings: inputRow.
 	self writeExecuteMessage: 0.
 	client writeSyncMessage.
@@ -112,7 +116,7 @@ P3PreparedStatement >> execute: inputRow [
 	^ (client runExtendedQueryResults: fieldDescriptions) first result
 ]
 
-{ #category : #public }
+{ #category : 'public' }
 P3PreparedStatement >> executeBatch: inputRows [
 	"Execute this SQL query multiple (inputRow size) times in a single network roundtrip.
 	Assume no rows will be returned."
@@ -120,6 +124,7 @@ P3PreparedStatement >> executeBatch: inputRows [
 	inputRows isEmpty
 		ifTrue: [ ^ #() ].
 
+	client setSource: self source.
 	inputRows do: [ :eachRow |
 		self bindStrings: eachRow.
 		self writeExecuteMessage: 0 ].
@@ -128,17 +133,17 @@ P3PreparedStatement >> executeBatch: inputRows [
 	^ (client runExtendedQueryResults: fieldDescriptions) collect: [ :each | each result ]
 ]
 
-{ #category : #accessing }
+{ #category : 'accessing' }
 P3PreparedStatement >> fieldCount [
 	^ fieldDescriptions size
 ]
 
-{ #category : #accessing }
+{ #category : 'accessing' }
 P3PreparedStatement >> fieldDescriptions [
 	^ fieldDescriptions
 ]
 
-{ #category : #initialization }
+{ #category : 'initialization' }
 P3PreparedStatement >> initializeWith: aClient name: aString parameters: aParamDescriptions fields: aRowFieldDescriptions [
 
 	client := aClient.
@@ -147,32 +152,33 @@ P3PreparedStatement >> initializeWith: aClient name: aString parameters: aParamD
 	fieldDescriptions := aRowFieldDescriptions
 ]
 
-{ #category : #accessing }
+{ #category : 'accessing' }
 P3PreparedStatement >> name [
 	^ name
 ]
 
-{ #category : #accessing }
+{ #category : 'accessing' }
 P3PreparedStatement >> paramCount [
 	^ paramDescriptions size
 ]
 
-{ #category : #accessing }
+{ #category : 'accessing' }
 P3PreparedStatement >> paramDescriptions [
 	^ paramDescriptions
 ]
 
-{ #category : #printing }
+{ #category : 'printing' }
 P3PreparedStatement >> printOn: stream [
 	super printOn: stream.
 	stream nextPut: $(; << name; nextPut: $)
 ]
 
-{ #category : #public }
+{ #category : 'public' }
 P3PreparedStatement >> query: inputRow [
 	"Execute this SQL query with inputRow as the ordered collection of parameters.
 	Answer a P3Result object with the field descriptions and rows."
 
+	client setSource: self source.
 	self bindStrings: inputRow.
 	self writeExecuteMessage: 0.
 	client writeSyncMessage.
@@ -180,7 +186,7 @@ P3PreparedStatement >> query: inputRow [
 	^ (client runExtendedQueryResults: fieldDescriptions) first
 ]
 
-{ #category : #public }
+{ #category : 'public' }
 P3PreparedStatement >> queryAll: inputRows [
 	"Execute this SQL query multiple times.
 	Answer a collection of P3Result objects with the field descriptions and rows."
@@ -188,6 +194,7 @@ P3PreparedStatement >> queryAll: inputRows [
 	inputRows isEmpty
 		ifTrue: [ ^ #() ].
 
+	client setSource: self source.
 	inputRows do: [ :eachRow |
 		self bindStrings: eachRow.
 		self writeExecuteMessage: 0 ].
@@ -196,7 +203,19 @@ P3PreparedStatement >> queryAll: inputRows [
 	^ client runExtendedQueryResults: fieldDescriptions
 ]
 
-{ #category : #'input/output' }
+{ #category : 'accessing' }
+P3PreparedStatement >> source [
+	"Return my SQL source"
+	
+	^ source
+]
+
+{ #category : 'accessing' }
+P3PreparedStatement >> source: anSQLTemplateString [
+	source := anSQLTemplateString
+]
+
+{ #category : 'input/output' }
 P3PreparedStatement >> writeCloseMessage: aName type: aChar [
 
 	| msgBuilder |
@@ -207,7 +226,7 @@ P3PreparedStatement >> writeCloseMessage: aName type: aChar [
 	client writeMessageNoFlush: msgBuilder asBytes tag: $C
 ]
 
-{ #category : #'input/output' }
+{ #category : 'input/output' }
 P3PreparedStatement >> writeDescribeMessage: aName type: aChar [
 	"Type $S to describe a prepared statement; or $P to describe a portal."
 	| msgBuilder |
@@ -218,7 +237,7 @@ P3PreparedStatement >> writeDescribeMessage: aName type: aChar [
 	client writeMessageNoFlush: msgBuilder asBytes tag: $D
 ]
 
-{ #category : #'input/output' }
+{ #category : 'input/output' }
 P3PreparedStatement >> writeExecuteMessage: rowLimit [
 
 	| msgBuilder |
@@ -230,7 +249,7 @@ P3PreparedStatement >> writeExecuteMessage: rowLimit [
 	client writeMessageNoFlush: msgBuilder asBytes tag: $E
 ]
 
-{ #category : #'input/output' }
+{ #category : 'input/output' }
 P3PreparedStatement >> writeFlushMessage [
 	client writeMessage: #[] tag: $H
 ]

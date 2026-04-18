@@ -4,15 +4,16 @@ P3FormattedStatementTest holds unit tests for the P3FormattedStatement class.
 I reuse the configuration of P3ClientTest.
 "
 Class {
-	#name : #P3FormattedStatementTest,
-	#superclass : #TestCase,
+	#name : 'P3FormattedStatementTest',
+	#superclass : 'TestCase',
 	#instVars : [
 		'client'
 	],
-	#category : #'P3-Tests'
+	#category : 'P3-Tests',
+	#package : 'P3-Tests'
 }
 
-{ #category : #running }
+{ #category : 'running' }
 P3FormattedStatementTest >> setUp [
 	super setUp.
 	client := P3Client new.
@@ -20,13 +21,13 @@ P3FormattedStatementTest >> setUp [
 	client connect
 ]
 
-{ #category : #running }
+{ #category : 'running' }
 P3FormattedStatementTest >> tearDown [
 	client close.
 	super tearDown
 ]
 
-{ #category : #tests }
+{ #category : 'tests' }
 P3FormattedStatementTest >> testBitString [
 	| statement bitString fixedBitString result |
 	
@@ -47,7 +48,7 @@ P3FormattedStatementTest >> testBitString [
 	client execute: 'DROP TABLE testBits'
 ]
 
-{ #category : #tests }
+{ #category : 'tests' }
 P3FormattedStatementTest >> testByteArray [
 	| statement bytes result |
 	
@@ -67,7 +68,7 @@ P3FormattedStatementTest >> testByteArray [
 	client execute: 'DROP TABLE testBytea'
 ]
 
-{ #category : #tests }
+{ #category : 'tests' }
 P3FormattedStatementTest >> testChronology [
 	| result statement now |
 	client execute: 'DROP TABLE IF EXISTS table1'.
@@ -93,7 +94,7 @@ P3FormattedStatementTest >> testChronology [
 	client execute: 'DROP TABLE table1'
 ]
 
-{ #category : #tests }
+{ #category : 'tests' }
 P3FormattedStatementTest >> testChronologyWithTimezone [
 	| result statement now |
 	client execute: 'DROP TABLE IF EXISTS table1'.
@@ -119,7 +120,7 @@ P3FormattedStatementTest >> testChronologyWithTimezone [
 	client execute: 'DROP TABLE table1'
 ]
 
-{ #category : #tests }
+{ #category : 'tests' }
 P3FormattedStatementTest >> testGeometricTypes [
 	| p1 p2 p3 points row1 row2 row3 statement result |
 	(client isServerVersionAtLeastMajor: 9 minor: 4) ifFalse: [ ^ self skip ].
@@ -147,7 +148,7 @@ P3FormattedStatementTest >> testGeometricTypes [
 	client execute: 'DROP TABLE table1'
 ]
 
-{ #category : #tests }
+{ #category : 'tests' }
 P3FormattedStatementTest >> testInClause [
 	| statement result |
 	
@@ -163,20 +164,20 @@ P3FormattedStatementTest >> testInClause [
 	
 	statement := client format: 'SELECT id, name FROM table1 WHERE id = ANY ($1) ORDER BY id'.
 
-	result := statement query: { P3ValuesArray withAll: #( 2 3 ) }.
+	result := statement query: { #( 2 3 ) }.
 	self assert: result records equals: #( (2 'Greetings') (3 'From Mars') ).
 	
-	result := statement query: { P3ValuesArray withAll: #( 3 ) }.
+	result := statement query: { #( 3 ) }.
 	self assert: result records equals: #( (3 'From Mars') ).
 	
-	result := statement query: { P3ValuesArray withAll: #( 666 ) }.
+	result := statement query: { #( 666 ) }.
 	self assert: result records equals: #( ).
 	
 	statement close.
 	client execute: 'DROP TABLE table1'.
 ]
 
-{ #category : #tests }
+{ #category : 'tests' }
 P3FormattedStatementTest >> testInterval [
 	| statement intervals result |
 	
@@ -194,7 +195,7 @@ P3FormattedStatementTest >> testInterval [
 	client execute: 'DROP TABLE table1'
 ]
 
-{ #category : #tests }
+{ #category : 'tests' }
 P3FormattedStatementTest >> testNull [
 	| statement result |
 	
@@ -211,7 +212,25 @@ P3FormattedStatementTest >> testNull [
 	client execute: 'DROP TABLE table1'
 ]
 
-{ #category : #tests }
+{ #category : 'tests' }
+P3FormattedStatementTest >> testPrintOn [
+"client format: returns a P3FormattedStatement. Use result to test printOn:"
+
+	| sql p3fs result|
+	
+	sql := 'INSERT INTO table1 (id, name) VALUES ($1, $2)'.
+	
+	p3fs := client format: sql.
+	
+	result := String streamContents: [ :stream | p3fs printOn: stream ].
+	
+	self assert: result contents equals: ('a P3FormattedStatement({1})' format: { sql })
+	
+	
+	
+]
+
+{ #category : 'tests' }
 P3FormattedStatementTest >> testSimple [
 	| statement result |
 	
@@ -238,7 +257,7 @@ P3FormattedStatementTest >> testSimple [
 	client execute: 'DROP TABLE table1'
 ]
 
-{ #category : #tests }
+{ #category : 'tests' }
 P3FormattedStatementTest >> testStrings [
 	| statement string result |
 	
